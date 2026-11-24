@@ -5,7 +5,7 @@ Campaign and borrower models.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Optional
 from uuid import UUID, uuid4
 
@@ -21,7 +21,7 @@ class CampaignRecord:
     target_answer_rate: float = 0.50
     avg_talk_time_secs: int = 120
     is_active: bool = True
-    created_at: datetime = field(default_factory=datetime.utcnow)
+    created_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
 
     @staticmethod
     def new(
@@ -55,7 +55,7 @@ class BorrowerRecord:
     is_callable: bool = True
     locked_by: Optional[str] = None
     locked_at: Optional[datetime] = None
-    created_at: datetime = field(default_factory=datetime.utcnow)
+    created_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
 
     @staticmethod
     def new(

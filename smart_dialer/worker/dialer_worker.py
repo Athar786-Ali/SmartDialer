@@ -24,7 +24,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Dict, List, Optional
 from uuid import UUID, uuid4
 
@@ -71,7 +71,7 @@ class DialerWorker:
 
         self._running = False
         self._tick_count = 0
-        self._last_recovery = datetime.min
+        self._last_recovery = datetime.min.replace(tzinfo=timezone.utc)
         self._campaign_ids: List[UUID] = []
 
         # Metrics for observability
@@ -133,7 +133,7 @@ class DialerWorker:
             await self._tick_campaign(campaign_id)
 
         # Periodic crash recovery
-        now = datetime.utcnow()
+        now = datetime.now(timezone.utc)
         if (now - self._last_recovery).total_seconds() >= self._config.timeouts.recovery_sweep_secs:
             await self._recovery.sweep()
             self._last_recovery = now

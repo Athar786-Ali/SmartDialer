@@ -15,7 +15,7 @@ from __future__ import annotations
 import enum
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Callable, Awaitable, Optional
 from uuid import UUID, uuid4
 
@@ -29,6 +29,7 @@ class ProviderEventType(str, enum.Enum):
     ANSWERED  = "ANSWERED"
     COMPLETED = "COMPLETED"
     FAILED    = "FAILED"
+    CANCELLED = "CANCELLED"
     BUSY      = "BUSY"
     NO_ANSWER = "NO_ANSWER"
     REJECTED  = "REJECTED"
@@ -42,7 +43,7 @@ class ProviderEvent:
     provider_call_id: str                    # provider's opaque call identifier
     call_id: UUID                            # our internal call UUID
     event_type: ProviderEventType
-    timestamp: datetime = field(default_factory=datetime.utcnow)
+    timestamp: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
     metadata: dict = field(default_factory=dict)   # provider-specific extras
 
     @staticmethod

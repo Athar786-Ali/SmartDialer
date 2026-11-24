@@ -17,7 +17,7 @@ All tests use the InMemoryStore — no PostgreSQL required.
 import asyncio
 import pytest
 import pytest_asyncio
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from uuid import uuid4
 
 from smart_dialer.config import Config, SafetyConfig, PacingConfig
@@ -68,7 +68,7 @@ async def seeded_store(store, campaign_id):
     for i in range(10):
         agent = AgentRecord.new(f"Agent-{i}", campaign_id)
         agent.state = AgentState.AVAILABLE
-        agent.state_changed_at = datetime.utcnow()
+        agent.state_changed_at = datetime.now(timezone.utc)
         await store.create_agent(agent)
 
     for i in range(50):
@@ -566,7 +566,7 @@ class TestFailureScenarios:
         # Simulate time passing (make the reservation stale)
         async with seeded_store._lock:
             seeded_store._agents[agent.id].state_changed_at = (
-                datetime.utcnow() - timedelta(seconds=60)
+                datetime.now(timezone.utc) - timedelta(seconds=60)
             )
 
         from smart_dialer.config import TimeoutConfig
@@ -578,6 +578,40 @@ class TestFailureScenarios:
         # Agent should be AVAILABLE again
         recovered = await seeded_store.get_agent(agent.id)
         assert recovered.state == AgentState.AVAILABLE
+
+    @pytest.mark.asyncio
+    async def test_crash_recovery_skips_active_ringing_call_within_ring_timeout(
+        self, seeded_store, campaign_id,
+    ):
+        """A DIALING agent with a live RINGING call within max_ring_secs is not killed early."""
+        agent = await seeded_store.reserve_available_agent(campaign_id, "w1")
+        call = CallRecord.new(campaign_id, uuid4(), agent.id)
+        call.state = CallState.RINGING
+        call.initiated_at = datetime.now(timezone.utc) - timedelta(seconds=12)
+        call.version = 1
+        await seeded_store.create_call(call)
+
+        await seeded_store.transition_agent(
+            agent.id, AgentState.DIALING, agent.version, current_call_id=call.id,
+        )
+        # Age the agent past max_reserve_secs (10s), but call is still < max_ring_secs (30s)
+        async with seeded_store._lock:
+            seeded_store._agents[agent.id].state_changed_at = (
+                datetime.now(timezone.utc) - timedelta(seconds=12)
+            )
+
+        from smart_dialer.config import TimeoutConfig
+        recovery = CrashRecovery(
+            seeded_store, TimeoutConfig(max_reserve_secs=10, max_ring_secs=30),
+        )
+        summary = await recovery.sweep()
+
+        assert summary["stale_reserved_agents"] == 0
+        assert summary["stale_ringing_calls"] == 0
+        still_dialing = await seeded_store.get_agent(agent.id)
+        assert still_dialing.state == AgentState.DIALING
+        still_ringing = await seeded_store.get_call(call.id)
+        assert still_ringing.state == CallState.RINGING
 
     @pytest.mark.asyncio
     async def test_out_of_order_events_handled(self, seeded_store, campaign_id):
@@ -757,6 +791,194 @@ class TestWebhookHandler:
 
         updated_agent = await seeded_store.get_agent(agent.id)
         assert updated_agent.state == AgentState.WRAP_UP
+
+    @pytest.mark.asyncio
+    async def test_failed_call_releases_agent_from_dialing(self, seeded_store, campaign_id):
+        """When a call FAILS while agent is DIALING, agent returns to AVAILABLE and clears call ref."""
+        handler = WebhookHandler(seeded_store)
+
+        agent = await seeded_store.reserve_available_agent(campaign_id, "w1")
+        call = CallRecord.new(campaign_id, uuid4(), agent.id)
+        call.state = CallState.RINGING
+        call.version = 1
+        call.provider_name = "reliable"
+        call.provider_call_id = "prov-fail-1"
+        await seeded_store.create_call(call)
+
+        await seeded_store.transition_agent(
+            agent.id, AgentState.DIALING, agent.version,
+            current_call_id=call.id, worker_id="w1",
+        )
+
+        event = ProviderEvent.make(
+            "reliable", "prov-fail-1", call.id,
+            ProviderEventType.FAILED, reason="NO_ANSWER",
+        )
+        await handler.handle_event(event)
+
+        updated_agent = await seeded_store.get_agent(agent.id)
+        assert updated_agent.state == AgentState.AVAILABLE
+        assert updated_agent.current_call_id is None
+        assert updated_agent.worker_id is None
+
+        updated_call = await seeded_store.get_call(call.id)
+        assert updated_call.state == CallState.FAILED
+
+    @pytest.mark.asyncio
+    async def test_failed_call_releases_agent_from_reserved(self, seeded_store, campaign_id):
+        """When NO_ANSWER/FAILED arrives while agent is RESERVED, agent returns to AVAILABLE."""
+        handler = WebhookHandler(seeded_store)
+
+        agent = await seeded_store.reserve_available_agent(campaign_id, "w1")
+        call = CallRecord.new(campaign_id, uuid4(), agent.id)
+        call.state = CallState.INITIATED
+        call.version = 1
+        call.provider_name = "reliable"
+        call.provider_call_id = "prov-fail-res"
+        await seeded_store.create_call(call)
+
+        event = ProviderEvent.make(
+            "reliable", "prov-fail-res", call.id,
+            ProviderEventType.NO_ANSWER,
+        )
+        await handler.handle_event(event)
+
+        updated_agent = await seeded_store.get_agent(agent.id)
+        assert updated_agent.state == AgentState.AVAILABLE
+        assert updated_agent.current_call_id is None
+        assert updated_agent.worker_id is None
+
+        updated_call = await seeded_store.get_call(call.id)
+        assert updated_call.state == CallState.FAILED
+
+    @pytest.mark.asyncio
+    async def test_cancelled_call_releases_agent_from_reserved_and_dialing(
+        self, seeded_store, campaign_id,
+    ):
+        """CANCELLED webhook events immediately release RESERVED or DIALING agents to AVAILABLE."""
+        handler = WebhookHandler(seeded_store)
+
+        # Case 1: Agent in RESERVED
+        agent_reserved = await seeded_store.reserve_available_agent(campaign_id, "w1")
+        call1 = CallRecord.new(campaign_id, uuid4(), agent_reserved.id)
+        call1.state = CallState.RESERVED
+        call1.version = 0
+        call1.provider_name = "reliable"
+        call1.provider_call_id = "prov-cancel-res"
+        await seeded_store.create_call(call1)
+
+        await handler.handle_event(ProviderEvent.make(
+            "reliable", "prov-cancel-res", call1.id,
+            ProviderEventType.CANCELLED, reason="agent_timeout",
+        ))
+
+        updated_call1 = await seeded_store.get_call(call1.id)
+        assert updated_call1.state == CallState.CANCELLED
+        updated_agent1 = await seeded_store.get_agent(agent_reserved.id)
+        assert updated_agent1.state == AgentState.AVAILABLE
+        assert updated_agent1.current_call_id is None
+
+        # Case 2: Agent in DIALING
+        agent_dialing = await seeded_store.reserve_available_agent(campaign_id, "w1")
+        call2 = CallRecord.new(campaign_id, uuid4(), agent_dialing.id)
+        call2.state = CallState.RINGING
+        call2.version = 1
+        call2.provider_name = "reliable"
+        call2.provider_call_id = "prov-cancel-dial"
+        await seeded_store.create_call(call2)
+
+        await seeded_store.transition_agent(
+            agent_dialing.id, AgentState.DIALING, agent_dialing.version,
+            current_call_id=call2.id, worker_id="w1",
+        )
+
+        await handler.handle_event(ProviderEvent.make(
+            "reliable", "prov-cancel-dial", call2.id,
+            ProviderEventType.CANCELLED, reason="campaign_stopped",
+        ))
+
+        updated_call2 = await seeded_store.get_call(call2.id)
+        assert updated_call2.state == CallState.CANCELLED
+        updated_agent2 = await seeded_store.get_agent(agent_dialing.id)
+        assert updated_agent2.state == AgentState.AVAILABLE
+        assert updated_agent2.current_call_id is None
+        assert updated_agent2.worker_id is None
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("inactive_state", [
+        AgentState.OFFLINE,
+        AgentState.PAUSED,
+        AgentState.AVAILABLE,
+    ])
+    async def test_failed_and_cancelled_do_not_overwrite_inactive_or_available_agent(
+        self, seeded_store, campaign_id, inactive_state,
+    ):
+        """If agent is already OFFLINE, PAUSED, or AVAILABLE, terminal events must not throw or overwrite."""
+        handler = WebhookHandler(seeded_store)
+
+        agent = await seeded_store.reserve_available_agent(campaign_id, "w1")
+        if inactive_state == AgentState.PAUSED:
+            await seeded_store.transition_agent(agent.id, AgentState.AVAILABLE, agent.version)
+            agent = await seeded_store.get_agent(agent.id)
+            await seeded_store.transition_agent(agent.id, AgentState.PAUSED, agent.version)
+        elif inactive_state == AgentState.AVAILABLE:
+            await seeded_store.transition_agent(agent.id, AgentState.AVAILABLE, agent.version)
+        elif inactive_state == AgentState.OFFLINE:
+            await seeded_store.transition_agent(agent.id, AgentState.OFFLINE, agent.version)
+
+        agent = await seeded_store.get_agent(agent.id)
+        assert agent.state == inactive_state
+        initial_version = agent.version
+
+        call = CallRecord.new(campaign_id, uuid4(), agent.id)
+        call.state = CallState.RINGING
+        call.version = 1
+        call.provider_name = "reliable"
+        call.provider_call_id = f"prov-safe-{inactive_state.value}"
+        await seeded_store.create_call(call)
+
+        event_type = (
+            ProviderEventType.CANCELLED
+            if inactive_state == AgentState.PAUSED
+            else ProviderEventType.FAILED
+        )
+        await handler.handle_event(ProviderEvent.make(
+            "reliable", call.provider_call_id, call.id, event_type,
+        ))
+
+        updated_agent = await seeded_store.get_agent(agent.id)
+        assert updated_agent.state == inactive_state
+        assert updated_agent.version == initial_version
+
+    @pytest.mark.asyncio
+    async def test_delayed_failure_for_old_call_does_not_release_agent_on_new_call(
+        self, seeded_store, campaign_id,
+    ):
+        """Delayed FAILED for old call must not release an agent now dialing a newer call."""
+        handler = WebhookHandler(seeded_store)
+
+        agent = await seeded_store.reserve_available_agent(campaign_id, "w1")
+        new_call = CallRecord.new(campaign_id, uuid4(), agent.id)
+        new_call.state = CallState.RINGING
+        await seeded_store.create_call(new_call)
+
+        await seeded_store.transition_agent(
+            agent.id, AgentState.DIALING, agent.version,
+            current_call_id=new_call.id, worker_id="w1",
+        )
+
+        old_call = CallRecord.new(campaign_id, uuid4(), agent.id)
+        old_call.state = CallState.RINGING
+        old_call.version = 1
+        await seeded_store.create_call(old_call)
+
+        await handler.handle_event(ProviderEvent.make(
+            "reliable", "prov-old", old_call.id, ProviderEventType.FAILED,
+        ))
+
+        updated_agent = await seeded_store.get_agent(agent.id)
+        assert updated_agent.state == AgentState.DIALING
+        assert updated_agent.current_call_id == new_call.id
 
 
 # ================================================================== #

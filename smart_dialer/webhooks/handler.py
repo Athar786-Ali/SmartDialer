@@ -30,7 +30,7 @@ import logging
 from typing import Dict
 
 from smart_dialer.models import (
-    AgentState, CallState, TERMINAL_CALL_STATES,
+    AgentState, CallRecord, CallState, TERMINAL_CALL_STATES,
 )
 from smart_dialer.providers.base import ProviderEvent, ProviderEventType
 from smart_dialer.store.base import Store
@@ -43,10 +43,13 @@ _EVENT_TO_CALL_STATE: Dict[ProviderEventType, CallState] = {
     ProviderEventType.ANSWERED:  CallState.ANSWERED,
     ProviderEventType.COMPLETED: CallState.COMPLETED,
     ProviderEventType.FAILED:    CallState.FAILED,
+    ProviderEventType.CANCELLED: CallState.CANCELLED,
     ProviderEventType.BUSY:      CallState.FAILED,
     ProviderEventType.NO_ANSWER: CallState.FAILED,
     ProviderEventType.REJECTED:  CallState.FAILED,
 }
+
+_MAX_AGENT_TRANSITION_RETRIES = 3
 
 
 class WebhookHandler:
@@ -124,7 +127,7 @@ class WebhookHandler:
 
         # ---- Step 4: Transition call state ----
         extra_fields = {}
-        if target_call_state == CallState.FAILED:
+        if target_call_state in (CallState.FAILED, CallState.CANCELLED):
             extra_fields["failure_reason"] = event.metadata.get(
                 "reason", event.event_type.value,
             )
@@ -151,23 +154,11 @@ class WebhookHandler:
             event.event_type.value,
         )
 
-        # ---- Step 5: Side-effects on agent state ----
-        if call.agent_id is None:
-            return
-
-        agent = await self._store.get_agent(call.agent_id)
-        if agent is None:
-            return
+        # ---- Step 5: Side-effects on agent & borrower state ----
+        if call.agent_id is not None:
+            await self._update_agent_for_call_event(call, target_call_state)
 
         if target_call_state == CallState.ANSWERED:
-            # Bridge agent to call → CONNECTED
-            if agent.state in (AgentState.DIALING, AgentState.RESERVED):
-                await self._store.transition_agent(
-                    agent.id,
-                    AgentState.CONNECTED,
-                    agent.version,
-                    current_call_id=call.id,
-                )
             # Bridge call to CONNECTED (agent ↔ borrower voice path)
             updated_call = await self._store.get_call(call.id)
             if updated_call and updated_call.state == CallState.ANSWERED:
@@ -176,22 +167,80 @@ class WebhookHandler:
                     CallState.CONNECTED,
                     updated_call.version,
                 )
-
-        elif target_call_state in (CallState.COMPLETED, CallState.FAILED):
-            # Call ended — move agent to WRAP_UP (unless already OFFLINE)
-            if agent.state in (
-                AgentState.CONNECTED, AgentState.DIALING, AgentState.RESERVED,
-            ):
-                await self._store.transition_agent(
-                    agent.id,
-                    AgentState.WRAP_UP,
-                    agent.version,
-                    current_call_id=call.id,
-                )
-            # Also mark borrower as called
+        elif target_call_state in (
+            CallState.COMPLETED, CallState.FAILED, CallState.CANCELLED,
+        ):
+            # Unlock / update borrower record
             if call.borrower_id:
-                was_connected = target_call_state == CallState.COMPLETED
-                await self._store.mark_borrower_called(
-                    call.borrower_id,
-                    success=was_connected,
+                if target_call_state == CallState.CANCELLED:
+                    await self._store.release_borrower(call.borrower_id)
+                else:
+                    was_connected = target_call_state == CallState.COMPLETED
+                    await self._store.mark_borrower_called(
+                        call.borrower_id,
+                        success=was_connected,
+                    )
+
+    async def _update_agent_for_call_event(
+        self,
+        call: CallRecord,
+        target_call_state: CallState,
+    ) -> None:
+        """
+        Update the bound agent's state with optimistic-lock retry.
+
+        Handles edge cases safely:
+        - Never throws or overwrites an agent in OFFLINE, PAUSED, AVAILABLE, or WRAP_UP.
+        - Does not release an agent already bound to a different call.
+        """
+        assert call.agent_id is not None
+
+        for _ in range(_MAX_AGENT_TRANSITION_RETRIES):
+            agent = await self._store.get_agent(call.agent_id)
+            if agent is None:
+                return
+
+            # Guard against out-of-order / delayed events affecting a newer call
+            if agent.current_call_id is not None and agent.current_call_id != call.id:
+                logger.debug(
+                    "Agent %s bound to different call %s (ignoring %s for %s)",
+                    agent.id, agent.current_call_id, target_call_state.value, call.id,
                 )
+                return
+
+            target_agent_state: AgentState | None = None
+            pass_call_id = None
+
+            if target_call_state == CallState.ANSWERED:
+                if agent.state in (AgentState.DIALING, AgentState.RESERVED):
+                    target_agent_state = AgentState.CONNECTED
+                    pass_call_id = call.id
+            elif target_call_state in (
+                CallState.COMPLETED, CallState.FAILED, CallState.CANCELLED,
+            ):
+                if agent.state == AgentState.CONNECTED:
+                    # Completed or dropped conversation → WRAP_UP
+                    target_agent_state = AgentState.WRAP_UP
+                    pass_call_id = call.id
+                elif agent.state in (AgentState.DIALING, AgentState.RESERVED):
+                    # Call failed, was cancelled, or ended before connection →
+                    # release agent immediately to AVAILABLE (clears current_call_id)
+                    target_agent_state = AgentState.AVAILABLE
+                # If agent is already OFFLINE, PAUSED, AVAILABLE, or WRAP_UP — no-op
+
+            if target_agent_state is None:
+                return
+
+            updated = await self._store.transition_agent(
+                agent.id,
+                target_agent_state,
+                agent.version,
+                current_call_id=pass_call_id,
+            )
+            if updated:
+                return
+
+        logger.warning(
+            "Exhausted optimistic-lock retries updating agent %s for call %s → %s",
+            call.agent_id, call.id, target_call_state.value,
+        )

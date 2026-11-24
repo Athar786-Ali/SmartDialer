@@ -30,7 +30,7 @@ import logging
 import sys
 import time
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict, List
 from uuid import UUID
@@ -297,7 +297,7 @@ async def run_simulation(scenario: Scenario, mode: str | None = None) -> None:
     for i in range(scenario.num_agents):
         agent = AgentRecord.new(f"Agent-{i:03d}", campaign.id)
         agent.state = AgentState.AVAILABLE
-        agent.state_changed_at = datetime.utcnow()
+        agent.state_changed_at = datetime.now(timezone.utc)
         await store.create_agent(agent)
 
     # Create borrowers
@@ -401,11 +401,11 @@ async def run_simulation(scenario: Scenario, mode: str | None = None) -> None:
                         and agent.campaign_id == campaign.id
                     ):
                         from datetime import timedelta
-                        if datetime.utcnow() - agent.state_changed_at > timedelta(seconds=3):
+                        if datetime.now(timezone.utc) - agent.state_changed_at > timedelta(seconds=3):
                             agent.state = AgentState.AVAILABLE
                             agent.current_call_id = None
                             agent.worker_id = None
-                            agent.state_changed_at = datetime.utcnow()
+                            agent.state_changed_at = datetime.now(timezone.utc)
                             agent.version += 1
 
     wrap_task = asyncio.create_task(auto_wrap_up_loop())
@@ -424,7 +424,7 @@ async def run_simulation(scenario: Scenario, mode: str | None = None) -> None:
                         and dropped < scenario.agent_dropout_count
                     ):
                         agent.state = AgentState.OFFLINE
-                        agent.state_changed_at = datetime.utcnow()
+                        agent.state_changed_at = datetime.now(timezone.utc)
                         agent.version += 1
                         dropped += 1
 

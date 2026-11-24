@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import asyncio
 import random
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Dict, List, Optional
 from uuid import UUID, uuid4
 
@@ -86,7 +86,7 @@ class UnreliableProvider(TelecomProvider):
         # Simulate outage
         if self._is_in_outage:
             self._total_failures += 1
-            self._last_failure_at = datetime.utcnow()
+            self._last_failure_at = datetime.now(timezone.utc)
             return PlaceCallResult(success=False, error="Provider outage")
 
         # Random outage trigger
@@ -94,7 +94,7 @@ class UnreliableProvider(TelecomProvider):
             self._is_in_outage = True
             asyncio.create_task(self._end_outage())
             self._total_failures += 1
-            self._last_failure_at = datetime.utcnow()
+            self._last_failure_at = datetime.now(timezone.utc)
             return PlaceCallResult(success=False, error="Provider outage")
 
         provider_call_id = f"flk-{uuid4().hex[:12]}"
@@ -106,7 +106,7 @@ class UnreliableProvider(TelecomProvider):
         # Timeout: call gets stuck, no events ever arrive
         if random.random() < self._timeout_rate:
             self._total_failures += 1
-            self._last_failure_at = datetime.utcnow()
+            self._last_failure_at = datetime.now(timezone.utc)
             # We return success but never send events — the dialer's
             # crash recovery must detect and clean this up
             return PlaceCallResult(
@@ -184,7 +184,7 @@ class UnreliableProvider(TelecomProvider):
             # Quick failure?
             if random.random() < self._failure_rate:
                 self._total_failures += 1
-                self._last_failure_at = datetime.utcnow()
+                self._last_failure_at = datetime.now(timezone.utc)
                 await asyncio.sleep(random.uniform(0.2, 0.8))
                 await self._emit(
                     call_id, provider_call_id,
@@ -227,7 +227,7 @@ class UnreliableProvider(TelecomProvider):
             else:
                 # No answer
                 self._total_failures += 1
-                self._last_failure_at = datetime.utcnow()
+                self._last_failure_at = datetime.now(timezone.utc)
                 events.append((
                     ring_time,
                     random.choice([

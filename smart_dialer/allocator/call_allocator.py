@@ -204,22 +204,22 @@ class CallAllocator:
         except Exception as e:
             logger.exception("Allocation failed: %s", e)
             # Best-effort rollback
-            if agent and borrower:
+            if agent:
                 try:
-                    await self._store.transition_agent(
-                        agent.id, AgentState.AVAILABLE, agent.version,
-                    )
+                    current_agent = await self._store.get_agent(agent.id)
+                    if current_agent and current_agent.state in (
+                        AgentState.RESERVED, AgentState.DIALING,
+                    ):
+                        await self._store.transition_agent(
+                            current_agent.id,
+                            AgentState.AVAILABLE,
+                            current_agent.version,
+                        )
                 except Exception:
                     pass
+            if borrower:
                 try:
                     await self._store.release_borrower(borrower.id)
-                except Exception:
-                    pass
-            elif agent:
-                try:
-                    await self._store.transition_agent(
-                        agent.id, AgentState.AVAILABLE, agent.version,
-                    )
                 except Exception:
                     pass
             return AllocationResult(
@@ -236,9 +236,11 @@ class CallAllocator:
         """Roll back a failed allocation."""
         try:
             # Agent version was bumped when we transitioned to DIALING
-            # Re-read to get current version
+            # Re-read to get current version and ensure we don't overwrite OFFLINE/PAUSED
             current_agent = await self._store.get_agent(agent.id)
-            if current_agent:
+            if current_agent and current_agent.state in (
+                AgentState.RESERVED, AgentState.DIALING,
+            ):
                 await self._store.transition_agent(
                     current_agent.id,
                     AgentState.AVAILABLE,

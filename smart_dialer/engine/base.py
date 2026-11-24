@@ -18,7 +18,7 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Optional
 from uuid import UUID
 
@@ -38,7 +38,7 @@ class PacingDecision:
     mode: str = "PROGRESSIVE"          # which engine produced this
     reasoning: str = ""                # human-readable explanation
     answer_rate_estimate: Optional[float] = None
-    timestamp: datetime = field(default_factory=datetime.utcnow)
+    timestamp: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
 
     def __repr__(self) -> str:
         return (

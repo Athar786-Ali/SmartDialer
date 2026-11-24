@@ -17,7 +17,7 @@ from __future__ import annotations
 
 import enum
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import FrozenSet, Optional, Set, Tuple
 from uuid import UUID, uuid4
 
@@ -121,7 +121,7 @@ class CallRecord:
     failure_reason: Optional[str] = None
     duration_ms: Optional[int] = None
     version: int = 0
-    created_at: datetime = field(default_factory=datetime.utcnow)
+    created_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
 
     @staticmethod
     def new(
@@ -134,7 +134,7 @@ class CallRecord:
             campaign_id=campaign_id,
             borrower_id=borrower_id,
             agent_id=agent_id,
-            created_at=datetime.utcnow(),
+            created_at=datetime.now(timezone.utc),
         )
 
     @property

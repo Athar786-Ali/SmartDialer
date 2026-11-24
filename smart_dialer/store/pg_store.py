@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import asyncpg
 from collections import defaultdict
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 from uuid import UUID
@@ -196,7 +196,7 @@ class PgStore(Store):
                     return None
 
                 new_version = row["version"] + 1
-                now = datetime.utcnow()
+                now = datetime.now(timezone.utc)
                 await conn.execute(
                     """
                     UPDATE agents

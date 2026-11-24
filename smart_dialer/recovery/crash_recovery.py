@@ -28,7 +28,6 @@ Failure scenarios handled
 from __future__ import annotations
 
 import logging
-from datetime import datetime
 
 from smart_dialer.config import TimeoutConfig
 from smart_dialer.models import AgentState, CallState
@@ -65,11 +64,23 @@ class CrashRecovery:
             "expired_wrap_ups": 0,
         }
 
-        # ---- 1. Agents stuck in RESERVED / DIALING ----
+        # ---- 1. Agents stuck in RESERVED / stale DIALING ----
         stale_agents = await self._store.get_stale_reserved_agents(
             self._cfg.max_reserve_secs,
         )
         for agent in stale_agents:
+            # Skip DIALING agents bound to an active INITIATED/RINGING call:
+            # initiate/ring timeouts are governed by checks #2 and #3 below so
+            # normally ringing calls aren't prematurely cancelled.
+            if agent.state == AgentState.DIALING and agent.current_call_id:
+                bound_call = await self._store.get_call(agent.current_call_id)
+                if (
+                    bound_call is not None
+                    and not bound_call.is_terminal
+                    and bound_call.state in (CallState.INITIATED, CallState.RINGING)
+                ):
+                    continue
+
             success = await self._store.transition_agent(
                 agent.id,
                 AgentState.AVAILABLE,
@@ -114,11 +125,13 @@ class CrashRecovery:
                 logger.warning(
                     "Recovered stale INITIATED call %s → FAILED", call.id,
                 )
-                # Recover the agent
+                # Recover the agent if still bound to this call
                 if call.agent_id:
                     agent = await self._store.get_agent(call.agent_id)
-                    if agent and agent.state in (
-                        AgentState.DIALING, AgentState.RESERVED,
+                    if (
+                        agent
+                        and agent.state in (AgentState.DIALING, AgentState.RESERVED)
+                        and agent.current_call_id in (None, call.id)
                     ):
                         await self._store.transition_agent(
                             agent.id,
@@ -147,7 +160,11 @@ class CrashRecovery:
                 )
                 if call.agent_id:
                     agent = await self._store.get_agent(call.agent_id)
-                    if agent and agent.state == AgentState.DIALING:
+                    if (
+                        agent
+                        and agent.state in (AgentState.DIALING, AgentState.RESERVED)
+                        and agent.current_call_id in (None, call.id)
+                    ):
                         await self._store.transition_agent(
                             agent.id,
                             AgentState.AVAILABLE,

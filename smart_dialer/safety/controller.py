@@ -30,7 +30,7 @@ from __future__ import annotations
 
 import enum
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import List
 
 from smart_dialer.config import SafetyConfig
@@ -55,7 +55,7 @@ class SafetyDecision:
     approved_calls: int
     original_request: int
     reasons: List[str] = field(default_factory=list)
-    timestamp: datetime = field(default_factory=datetime.utcnow)
+    timestamp: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
 
     def __repr__(self) -> str:
         return (

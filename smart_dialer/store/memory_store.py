@@ -22,7 +22,7 @@ from __future__ import annotations
 
 import asyncio
 from collections import defaultdict
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
 from uuid import UUID
 
@@ -92,7 +92,7 @@ class InMemoryStore(Store):
             agent = candidates[0]
             agent.state = AgentState.RESERVED
             agent.worker_id = worker_id
-            agent.state_changed_at = datetime.utcnow()
+            agent.state_changed_at = datetime.now(timezone.utc)
             agent.version += 1
             return AgentRecord(
                 id=agent.id,
@@ -124,7 +124,7 @@ class InMemoryStore(Store):
                 return False
             agent.state = to_state
             agent.version += 1
-            agent.state_changed_at = datetime.utcnow()
+            agent.state_changed_at = datetime.now(timezone.utc)
             if current_call_id is not None:
                 agent.current_call_id = current_call_id
             if worker_id is not None:
@@ -158,7 +158,7 @@ class InMemoryStore(Store):
     async def get_stale_reserved_agents(
         self, threshold_secs: int,
     ) -> List[AgentRecord]:
-        cutoff = datetime.utcnow() - timedelta(seconds=threshold_secs)
+        cutoff = datetime.now(timezone.utc) - timedelta(seconds=threshold_secs)
         results = []
         for a in self._agents.values():
             if a.state in (AgentState.RESERVED, AgentState.DIALING):
@@ -189,13 +189,13 @@ class InMemoryStore(Store):
                     and b.locked_by is None
                     and b.call_attempts < b.max_attempts
                 ),
-                key=lambda b: (-b.priority, b.last_called_at or datetime.min),
+                key=lambda b: (-b.priority, b.last_called_at or datetime.min.replace(tzinfo=timezone.utc)),
             )
             if not candidates:
                 return None
             borrower = candidates[0]
             borrower.locked_by = worker_id
-            borrower.locked_at = datetime.utcnow()
+            borrower.locked_at = datetime.now(timezone.utc)
             return BorrowerRecord(
                 id=borrower.id, campaign_id=borrower.campaign_id,
                 name=borrower.name, phone=borrower.phone,
@@ -222,7 +222,7 @@ class InMemoryStore(Store):
             b = self._borrowers.get(borrower_id)
             if b:
                 b.call_attempts += 1
-                b.last_called_at = datetime.utcnow()
+                b.last_called_at = datetime.now(timezone.utc)
                 b.locked_by = None
                 b.locked_at = None
                 if b.call_attempts >= b.max_attempts:
@@ -256,7 +256,7 @@ class InMemoryStore(Store):
 
             call.state = to_state
             call.version += 1
-            now = datetime.utcnow()
+            now = datetime.now(timezone.utc)
             call.updated_at = now
 
             # Timestamp bookkeeping
@@ -308,7 +308,7 @@ class InMemoryStore(Store):
     async def get_stale_calls(
         self, state: CallState, threshold_secs: int,
     ) -> List[CallRecord]:
-        cutoff = datetime.utcnow() - timedelta(seconds=threshold_secs)
+        cutoff = datetime.now(timezone.utc) - timedelta(seconds=threshold_secs)
         results = []
         for c in self._calls.values():
             if c.state != state:
@@ -357,7 +357,7 @@ class InMemoryStore(Store):
         calls_connected = call_counts.get(CallState.CONNECTED, 0)
 
         # Compute recent metrics from call history
-        now = datetime.utcnow()
+        now = datetime.now(timezone.utc)
         window = timedelta(seconds=300)
         recent_placed = 0
         recent_answered = 0
@@ -441,10 +441,10 @@ class InMemoryStore(Store):
     # ---- heartbeats ----
 
     async def heartbeat(self, worker_id: str, campaign_ids: List[UUID]) -> None:
-        self._heartbeats[worker_id] = datetime.utcnow()
+        self._heartbeats[worker_id] = datetime.now(timezone.utc)
 
     async def get_dead_workers(self, threshold_secs: int) -> List[str]:
-        cutoff = datetime.utcnow() - timedelta(seconds=threshold_secs)
+        cutoff = datetime.now(timezone.utc) - timedelta(seconds=threshold_secs)
         return [
             wid for wid, ts in self._heartbeats.items()
             if ts < cutoff

@@ -20,7 +20,7 @@ from __future__ import annotations
 
 import enum
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import FrozenSet, Optional, Tuple
 from uuid import UUID, uuid4
 
@@ -95,13 +95,13 @@ class AgentRecord:
     state: AgentState
     current_call_id: Optional[UUID] = None
     worker_id: Optional[str] = None
-    state_changed_at: datetime = field(default_factory=datetime.utcnow)
+    state_changed_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
     version: int = 0
-    created_at: datetime = field(default_factory=datetime.utcnow)
+    created_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
 
     @staticmethod
     def new(name: str, campaign_id: Optional[UUID] = None) -> "AgentRecord":
-        now = datetime.utcnow()
+        now = datetime.now(timezone.utc)
         return AgentRecord(
             id=uuid4(),
             name=name,
